@@ -1,412 +1,537 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import func, select
 
-from models import async_session, User, Card, UserCard, Technique, UserTechnique, Title, UserTitle
-from utils.card_data import ALL_CARDS
-from utils.technique_data import ALL_TECHNIQUES
+from config import ADMIN_IDS as CONFIG_ADMIN_IDS
+from models import async_session, Battle, Card, Technique, Title, User, UserCard, UserTechnique, UserTitle
 from utils.achievement_data import TITLES
+from utils.card_data import ALL_CARDS, CHARACTER_CARDS
+from utils.pvp_progression import apply_experience_with_pvp_rolls
+from utils.technique_data import ALL_TECHNIQUES
 
 router = Router()
 
-ADMIN_IDS = [1296861067]
-# Проверка на админа
+# Запасной bootstrap-админ на случай пустого ADMIN_IDS в .env
+ADMIN_IDS = set(CONFIG_ADMIN_IDS + [1296861067])
+CHARACTER_CARD_NAMES = {card["name"] for card in CHARACTER_CARDS}
+
+
+def _admin_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🎴 Выдать карту", callback_data="admin_give_card"),
+                InlineKeyboardButton(text="✨ Выдать технику", callback_data="admin_give_tech"),
+            ],
+            [
+                InlineKeyboardButton(text="💰 Выдать валюту", callback_data="admin_give_currency"),
+                InlineKeyboardButton(text="👑 Выдать титул", callback_data="admin_give_title"),
+            ],
+            [
+                InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+                InlineKeyboardButton(text="🔧 Настройки", callback_data="admin_settings"),
+            ],
+        ]
+    )
+
+
+def _display_name(user: User) -> str:
+    if user.first_name:
+        return user.first_name
+    if user.username:
+        return f"@{user.username}"
+    return str(user.telegram_id)
+
+
+async def _resolve_user(session, target_raw: str) -> User | None:
+    target = (target_raw or "").strip()
+    if not target:
+        return None
+
+    if target.startswith("@"):
+        username = target[1:].strip().lower()
+        if not username:
+            return None
+        result = await session.execute(
+            select(User).where(func.lower(User.username) == username)
+        )
+        return result.scalar_one_or_none()
+
+    if target.isdigit():
+        result = await session.execute(
+            select(User).where(User.telegram_id == int(target))
+        )
+        return result.scalar_one_or_none()
+
+    result = await session.execute(
+        select(User).where(func.lower(User.username) == target.lower())
+    )
+    return result.scalar_one_or_none()
+
+
+def _find_card_data(card_name: str) -> dict | None:
+    normalized = (card_name or "").strip().lower()
+    for card in ALL_CARDS:
+        if card["name"].lower() == normalized:
+            return card
+    return None
+
+
+def _find_tech_data(tech_name: str) -> dict | None:
+    normalized = (tech_name or "").strip().lower()
+    for tech in ALL_TECHNIQUES:
+        if tech["name"].lower() == normalized:
+            return tech
+    return None
+
+
+def _find_title_data(title_name: str) -> dict | None:
+    normalized = (title_name or "").strip().lower()
+    for title in TITLES:
+        if title["name"].lower() == normalized:
+            return title
+    return None
+
+
+def _parse_name_and_optional_level(raw_args: list[str]) -> tuple[str, int]:
+    level = 1
+    parts = list(raw_args)
+    if parts and parts[-1].isdigit():
+        level = int(parts[-1])
+        parts = parts[:-1]
+    name = " ".join(parts).replace("_", " ").strip()
+    return name, level
+
+
+async def _notify_user_safe(message: Message, user: User, text: str):
+    try:
+        await message.bot.send_message(user.telegram_id, text, parse_mode="HTML")
+    except Exception:
+        pass
+
+
 async def is_admin(telegram_id: int) -> bool:
     if telegram_id in ADMIN_IDS:
         return True
-    
+
     async with async_session() as session:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
         user = result.scalar_one_or_none()
-        return user and user.is_admin
+        return bool(user and user.is_admin)
+
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
-    """Админ панель"""
     if not await is_admin(message.from_user.id):
         await message.answer("❌ У тебя нет прав администратора!")
         return
-    
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🎴 Выдать карту", callback_data="admin_give_card"),
-            InlineKeyboardButton(text="✨ Выдать технику", callback_data="admin_give_tech")
-        ],
-        [
-            InlineKeyboardButton(text="💰 Выдать валюту", callback_data="admin_give_currency"),
-            InlineKeyboardButton(text="👑 Выдать титул", callback_data="admin_give_title")
-        ],
-        [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-            InlineKeyboardButton(text="🔧 Настройки", callback_data="admin_settings")
-        ]
-    ])
-    
+
     await message.answer(
-        "🔧 <b>Админ Панель</b>\n\n"
-        "Выбери действие:",
-        reply_markup=keyboard,
-        parse_mode="HTML"
+        "🔧 <b>Админ панель</b>\n\nВыбери действие:",
+        reply_markup=_admin_panel_keyboard(),
+        parse_mode="HTML",
     )
+
 
 @router.message(Command("givecard"))
 async def cmd_give_card(message: Message):
-    """Выдать карту игроку"""
     if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет прав!")
         return
-    
+
     args = message.text.split()[1:]
-    
     if len(args) < 2:
         await message.answer(
             "🎴 <b>Выдача карты</b>\n\n"
             "Использование:\n"
             "<code>/givecard @username Название_Карты [уровень]</code>\n"
             "<code>/givecard ID Название_Карты [уровень]</code>\n\n"
-            "Пример:\n"
-            "<code>/givecard @user Годжо_Сатору 10</code>"
+            "Примеры:\n"
+            "<code>/givecard @user Годжо_Сатору 10</code>\n"
+            "<code>/givecard 123456789 Рёмен_Сукуна</code>",
+            parse_mode="HTML",
         )
         return
-    
-    target = args[0]
-    card_name = args[1].replace("_", " ")
-    level = int(args[2]) if len(args) > 2 else 1
-    
+
+    target_raw = args[0]
+    card_name, level = _parse_name_and_optional_level(args[1:])
+    if not card_name:
+        await message.answer("❌ Укажи название карты.")
+        return
+    if level < 1:
+        await message.answer("❌ Уровень карты должен быть >= 1.")
+        return
+
+    card_data = _find_card_data(card_name)
+    if not card_data:
+        await message.answer(f"❌ Карта '{card_name}' не найдена.")
+        return
+
     async with async_session() as session:
-        # Ищем цель
-        if target.startswith("@"):
-            result = await session.execute(
-                select(User).where(User.username == target[1:])
-            )
-        else:
-            try:
-                target_id = int(target)
-                result = await session.execute(
-                    select(User).where(User.telegram_id == target_id)
-                )
-            except ValueError:
-                await message.answer("❌ Неверный формат цели!")
-                return
-        
-        target_user = result.scalar_one_or_none()
-        
+        target_user = await _resolve_user(session, target_raw)
         if not target_user:
-            await message.answer("❌ Игрок не найден!")
+            await message.answer("❌ Игрок не найден.")
             return
-        
-        # Ищем карту
-        card_data = None
-        for c in ALL_CARDS:
-            if c["name"].lower() == card_name.lower():
-                card_data = c
-                break
-        
-        if not card_data:
-            await message.answer(f"❌ Карта '{card_name}' не найдена!")
-            return
-        
-        # Создаем или получаем шаблон
+
         result = await session.execute(
             select(Card).where(Card.name == card_data["name"])
         )
         card_template = result.scalar_one_or_none()
-        
+
         if not card_template:
             card_template = Card(
                 name=card_data["name"],
-                description=card_data["description"],
-                card_type="character" if card_data in [c for c in ALL_CARDS if c.get("base_attack", 0) > 50] else "support",
+                description=card_data.get("description"),
+                card_type="character" if card_data["name"] in CHARACTER_CARD_NAMES else "support",
                 rarity=card_data["rarity"],
                 base_attack=card_data["base_attack"],
                 base_defense=card_data["base_defense"],
                 base_speed=card_data["base_speed"],
                 base_hp=card_data["base_hp"],
-                growth_multiplier=card_data["growth_multiplier"]
+                growth_multiplier=card_data["growth_multiplier"],
             )
             session.add(card_template)
             await session.flush()
-        
-        # Создаем карту пользователя
+
         user_card = UserCard(
             user_id=target_user.id,
             card_id=card_template.id,
-            level=level
+            level=level,
         )
         user_card.recalculate_stats()
         session.add(user_card)
         await session.commit()
-        
+
         await message.answer(
-            f"✅ <b>Карта выдана!</b>\n\n"
-            f"Игрок: {target_user.first_name or target_user.username}\n"
+            "✅ <b>Карта выдана!</b>\n\n"
+            f"Игрок: {_display_name(target_user)}\n"
             f"Карта: {card_data['name']}\n"
             f"Уровень: {level}\n"
-            f"Редкость: {card_data['rarity']}"
+            f"Редкость: {card_data['rarity']}",
+            parse_mode="HTML",
         )
+        await _notify_user_safe(
+            message,
+            target_user,
+            "🎁 <b>Тебе выдали карту!</b>\n\n"
+            f"Карта: {card_data['name']}\n"
+            f"Уровень: {level}",
+        )
+
 
 @router.message(Command("givetech"))
 async def cmd_give_tech(message: Message):
-    """Выдать технику игроку"""
     if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет прав!")
         return
-    
+
     args = message.text.split()[1:]
-    
     if len(args) < 2:
         await message.answer(
             "✨ <b>Выдача техники</b>\n\n"
             "Использование:\n"
-            "<code>/givetech @username Название_Техники</code>\n\n"
+            "<code>/givetech @username Название_Техники</code>\n"
+            "<code>/givetech ID Название_Техники</code>\n\n"
             "Пример:\n"
-            "<code>/givetech @user Шесть_Глаз</code>"
+            "<code>/givetech @user Шесть_Глаз</code>",
+            parse_mode="HTML",
         )
         return
-    
-    target = args[0]
-    tech_name = args[1].replace("_", " ")
-    
+
+    target_raw = args[0]
+    tech_name = " ".join(args[1:]).replace("_", " ").strip()
+    if not tech_name:
+        await message.answer("❌ Укажи название техники.")
+        return
+
+    tech_data = _find_tech_data(tech_name)
+    if not tech_data:
+        await message.answer(f"❌ Техника '{tech_name}' не найдена.")
+        return
+
     async with async_session() as session:
-        # Ищем цель
-        if target.startswith("@"):
-            result = await session.execute(
-                select(User).where(User.username == target[1:])
-            )
-        else:
-            try:
-                target_id = int(target)
-                result = await session.execute(
-                    select(User).where(User.telegram_id == target_id)
-                )
-            except ValueError:
-                await message.answer("❌ Неверный формат цели!")
-                return
-        
-        target_user = result.scalar_one_or_none()
-        
+        target_user = await _resolve_user(session, target_raw)
         if not target_user:
-            await message.answer("❌ Игрок не найден!")
+            await message.answer("❌ Игрок не найден.")
             return
-        
-        # Ищем технику
-        tech_data = None
-        for t in ALL_TECHNIQUES:
-            if t["name"].lower() == tech_name.lower():
-                tech_data = t
-                break
-        
-        if not tech_data:
-            await message.answer(f"❌ Техника '{tech_name}' не найдена!")
-            return
-        
-        # Создаем или получаем шаблон
+
         result = await session.execute(
             select(Technique).where(Technique.name == tech_data["name"])
         )
         tech_template = result.scalar_one_or_none()
-        
+
         if not tech_template:
             tech_template = Technique(
                 name=tech_data["name"],
-                description=tech_data["description"],
+                description=tech_data.get("description"),
                 technique_type=tech_data["technique_type"],
                 ce_cost=tech_data.get("ce_cost", 0),
                 effect_type=tech_data.get("effect_type"),
                 effect_value=tech_data.get("effect_value", 0),
-                icon=tech_data["icon"],
-                rarity=tech_data["rarity"]
+                trigger_chance=tech_data.get("trigger_chance", 0),
+                duration=tech_data.get("duration", 0),
+                icon=tech_data.get("icon", "✨"),
+                rarity=tech_data.get("rarity", "common"),
             )
             session.add(tech_template)
             await session.flush()
-        
-        # Проверяем, есть ли уже
+
         result = await session.execute(
             select(UserTechnique).where(
                 UserTechnique.user_id == target_user.id,
-                UserTechnique.technique_id == tech_template.id
+                UserTechnique.technique_id == tech_template.id,
             )
         )
         existing = result.scalar_one_or_none()
-        
         if existing:
-            await message.answer("❌ У игрока уже есть эта техника!")
+            await message.answer("❌ У игрока уже есть эта техника.")
             return
-        
-        # Выдаем технику
-        user_tech = UserTechnique(
-            user_id=target_user.id,
-            technique_id=tech_template.id,
-            level=1,
-            is_equipped=False
+
+        session.add(
+            UserTechnique(
+                user_id=target_user.id,
+                technique_id=tech_template.id,
+                level=1,
+                is_equipped=False,
+            )
         )
-        session.add(user_tech)
         await session.commit()
-        
+
         await message.answer(
-            f"✅ <b>Техника выдана!</b>\n\n"
-            f"Игрок: {target_user.first_name or target_user.username}\n"
+            "✅ <b>Техника выдана!</b>\n\n"
+            f"Игрок: {_display_name(target_user)}\n"
             f"Техника: {tech_data['name']}\n"
             f"Тип: {tech_data['technique_type']}\n"
-            f"Редкость: {tech_data['rarity']}"
+            f"Редкость: {tech_data['rarity']}",
+            parse_mode="HTML",
         )
+        await _notify_user_safe(
+            message,
+            target_user,
+            "🎁 <b>Тебе выдали технику!</b>\n\n"
+            f"Техника: {tech_data['name']}",
+        )
+
 
 @router.message(Command("givecurrency"))
 async def cmd_give_currency(message: Message):
-    """Выдать валюту игроку"""
     if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет прав!")
         return
-    
+
     args = message.text.split()[1:]
-    
     if len(args) < 3:
         await message.answer(
             "💰 <b>Выдача валюты</b>\n\n"
             "Использование:\n"
-            "<code>/givecurrency @username ТИП КОЛИЧЕСТВО</code>\n\n"
-            "Типы: coins, points, exp\n\n"
-            "Пример:\n"
-            "<code>/givecurrency @user coins 1000</code>"
+            "<code>/givecurrency @username coins|points|exp КОЛИЧЕСТВО</code>",
+            parse_mode="HTML",
         )
         return
-    
-    target = args[0]
-    currency_type = args[1].lower()
-    amount = int(args[2])
-    
+
+    target_raw = args[0]
+    currency_type = args[1].lower().strip()
+    try:
+        amount = int(args[2])
+    except ValueError:
+        await message.answer("❌ Количество должно быть числом.")
+        return
+
+    if amount <= 0:
+        await message.answer("❌ Количество должно быть больше 0.")
+        return
+
     async with async_session() as session:
-        # Ищем цель
-        if target.startswith("@"):
-            result = await session.execute(
-                select(User).where(User.username == target[1:])
-            )
-        else:
-            try:
-                target_id = int(target)
-                result = await session.execute(
-                    select(User).where(User.telegram_id == target_id)
-                )
-            except ValueError:
-                await message.answer("❌ Неверный формат цели!")
-                return
-        
-        target_user = result.scalar_one_or_none()
-        
+        target_user = await _resolve_user(session, target_raw)
         if not target_user:
-            await message.answer("❌ Игрок не найден!")
+            await message.answer("❌ Игрок не найден.")
             return
-        
-        # Выдаем валюту
+
         if currency_type == "coins":
             target_user.coins += amount
-            currency_name = "монет"
+            granted_label = f"{amount} монет"
         elif currency_type == "points":
             target_user.points += amount
-            currency_name = "очков"
+            granted_label = f"{amount} очков"
         elif currency_type == "exp":
-            target_user.add_experience(amount)
-            currency_name = "опыта"
+            _, actual_exp, unlocked = await apply_experience_with_pvp_rolls(session, target_user, amount)
+            granted_label = f"{actual_exp} опыта"
+            if unlocked:
+                granted_label += f"\nНовые PvP-техники: {', '.join(t.name for t in unlocked)}"
         else:
-            await message.answer("❌ Неверный тип валюты!")
+            await message.answer("❌ Неверный тип. Допустимо: coins, points, exp.")
             return
-        
+
         await session.commit()
-        
+
         await message.answer(
-            f"✅ <b>Валюта выдана!</b>\n\n"
-            f"Игрок: {target_user.first_name or target_user.username}\n"
-            f"Тип: {currency_name}\n"
-            f"Количество: +{amount}"
+            "✅ <b>Валюта выдана!</b>\n\n"
+            f"Игрок: {_display_name(target_user)}\n"
+            f"Выдано: {granted_label}",
+            parse_mode="HTML",
         )
+        await _notify_user_safe(
+            message,
+            target_user,
+            "🎁 <b>Тебе выдали награду от администратора!</b>\n\n"
+            f"{granted_label}",
+        )
+
+
+@router.message(Command("givetitle"))
+async def cmd_give_title(message: Message):
+    if not await is_admin(message.from_user.id):
+        await message.answer("❌ Нет прав!")
+        return
+
+    args = message.text.split()[1:]
+    if len(args) < 2:
+        await message.answer(
+            "👑 <b>Выдача титула</b>\n\n"
+            "Использование:\n"
+            "<code>/givetitle @username Название_Титула</code>\n"
+            "<code>/givetitle ID Название_Титула</code>\n\n"
+            "Пример:\n"
+            "<code>/givetitle @user Король_Проклятий</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    target_raw = args[0]
+    title_name = " ".join(args[1:]).replace("_", " ").strip()
+    if not title_name:
+        await message.answer("❌ Укажи название титула.")
+        return
+
+    async with async_session() as session:
+        target_user = await _resolve_user(session, target_raw)
+        if not target_user:
+            await message.answer("❌ Игрок не найден.")
+            return
+
+        result = await session.execute(
+            select(Title).where(func.lower(Title.name) == title_name.lower())
+        )
+        title_template = result.scalar_one_or_none()
+
+        if not title_template:
+            title_data = _find_title_data(title_name)
+            if title_data:
+                title_template = Title(
+                    name=title_data["name"],
+                    description=title_data.get("description"),
+                    attack_bonus=title_data.get("attack_bonus", 0),
+                    defense_bonus=title_data.get("defense_bonus", 0),
+                    speed_bonus=title_data.get("speed_bonus", 0),
+                    hp_bonus=title_data.get("hp_bonus", 0),
+                    icon=title_data.get("icon", "👑"),
+                    requirement=title_data.get("requirement", "Админ-выдача"),
+                )
+            else:
+                title_template = Title(
+                    name=title_name,
+                    description="Титул, выданный администратором.",
+                    icon="👑",
+                    requirement="Админ-выдача",
+                )
+            session.add(title_template)
+            await session.flush()
+
+        result = await session.execute(
+            select(UserTitle).where(
+                UserTitle.user_id == target_user.id,
+                UserTitle.title_id == title_template.id,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            await message.answer("❌ У игрока уже есть этот титул.")
+            return
+
+        session.add(
+            UserTitle(
+                user_id=target_user.id,
+                title_id=title_template.id,
+                is_equipped=False,
+            )
+        )
+        await session.commit()
+
+        await message.answer(
+            "✅ <b>Титул выдан!</b>\n\n"
+            f"Игрок: {_display_name(target_user)}\n"
+            f"Титул: {title_template.icon} {title_template.name}",
+            parse_mode="HTML",
+        )
+        await _notify_user_safe(
+            message,
+            target_user,
+            "👑 <b>Тебе выдали титул!</b>\n\n"
+            f"{title_template.icon} {title_template.name}",
+        )
+
 
 @router.message(Command("setadmin"))
 async def cmd_set_admin(message: Message):
-    """Назначить админа"""
     if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет прав!")
         return
-    
+
     args = message.text.split()[1:]
-    
     if not args:
-        await message.answer("Использование: /setadmin @username или ID")
+        await message.answer("Использование: <code>/setadmin @username</code> или <code>/setadmin ID</code>", parse_mode="HTML")
         return
-    
-    target = args[0]
-    
+
     async with async_session() as session:
-        if target.startswith("@"):
-            result = await session.execute(
-                select(User).where(User.username == target[1:])
-            )
-        else:
-            try:
-                target_id = int(target)
-                result = await session.execute(
-                    select(User).where(User.telegram_id == target_id)
-                )
-            except ValueError:
-                await message.answer("❌ Неверный формат!")
-                return
-        
-        target_user = result.scalar_one_or_none()
-        
+        target_user = await _resolve_user(session, args[0])
         if not target_user:
-            await message.answer("❌ Игрок не найден!")
+            await message.answer("❌ Игрок не найден.")
             return
-        
+
         target_user.is_admin = True
         await session.commit()
-        
-        await message.answer(
-            f"✅ {target_user.first_name or target_user.username} теперь администратор!"
-        )
+
+        await message.answer(f"✅ {_display_name(target_user)} теперь администратор!")
+
 
 @router.message(Command("broadcast"))
 async def cmd_broadcast(message: Message):
-    """Отправить сообщение всем игрокам"""
     if not await is_admin(message.from_user.id):
         await message.answer("❌ Нет прав!")
         return
-    
+
     args = message.text.split(maxsplit=1)
-    
-    if len(args) < 2:
-        await message.answer("Использование: /broadcast ТЕКСТ")
+    if len(args) < 2 or not args[1].strip():
+        await message.answer("Использование: <code>/broadcast ТЕКСТ</code>", parse_mode="HTML")
         return
-    
-    text = args[1]
-    
+
+    text = args[1].strip()
+
     async with async_session() as session:
         result = await session.execute(select(User))
         users = result.scalars().all()
-        
-        sent = 0
-        failed = 0
-        
-        for user in users:
-            try:
-                await message.bot.send_message(
-                    user.telegram_id,
-                    f"📢 <b>Сообщение от администрации:</b>\n\n{text}",
-                    parse_mode="HTML"
-                )
-                sent += 1
-            except:
-                failed += 1
-        
-        await message.answer(
-            f"✅ Рассылка завершена!\n"
-            f"Отправлено: {sent}\n"
-            f"Не удалось: {failed}"
-        )
+
+    sent = 0
+    failed = 0
+    for user in users:
+        try:
+            await message.bot.send_message(
+                user.telegram_id,
+                f"📢 <b>Сообщение от администрации:</b>\n\n{text}",
+                parse_mode="HTML",
+            )
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await message.answer(
+        "✅ Рассылка завершена!\n"
+        f"Отправлено: {sent}\n"
+        f"Не удалось: {failed}"
+    )
 
 
 @router.callback_query(F.data.in_({
@@ -415,21 +540,45 @@ async def cmd_broadcast(message: Message):
     "admin_give_currency",
     "admin_give_title",
     "admin_stats",
-    "admin_settings"
+    "admin_settings",
 }))
 async def admin_panel_callback(callback: CallbackQuery):
-    """Обработчик кнопок админ-панели"""
     if not await is_admin(callback.from_user.id):
         await callback.answer("❌ Нет прав администратора!", show_alert=True)
         return
 
-    command_help = {
-        "admin_give_card": "/givecard @username Название_Карты [уровень]",
-        "admin_give_tech": "/givetech @username Название_Техники",
-        "admin_give_currency": "/givecurrency @username coins|points|exp количество",
-        "admin_give_title": "Выдача титулов через кнопку пока в разработке.",
-        "admin_stats": "Статистика админ-панели пока в разработке.",
-        "admin_settings": "Настройки админ-панели пока в разработке."
-    }
+    if callback.data == "admin_give_card":
+        await callback.answer("/givecard @username Название_Карты [уровень]", show_alert=True)
+        return
 
-    await callback.answer(command_help.get(callback.data, "Функция в разработке."), show_alert=True)
+    if callback.data == "admin_give_tech":
+        await callback.answer("/givetech @username Название_Техники", show_alert=True)
+        return
+
+    if callback.data == "admin_give_currency":
+        await callback.answer("/givecurrency @username coins|points|exp количество", show_alert=True)
+        return
+
+    if callback.data == "admin_give_title":
+        await callback.answer("/givetitle @username Название_Титула", show_alert=True)
+        return
+
+    if callback.data == "admin_stats":
+        async with async_session() as session:
+            users_count = await session.scalar(select(func.count(User.id))) or 0
+            admins_count = await session.scalar(select(func.count(User.id)).where(User.is_admin.is_(True))) or 0
+            battles_count = await session.scalar(select(func.count(Battle.id))) or 0
+
+        await callback.answer(
+            f"Игроков: {users_count} | Админов: {admins_count} | Боёв: {battles_count}",
+            show_alert=True,
+        )
+        return
+
+    if callback.data == "admin_settings":
+        env_admins = ", ".join(str(admin_id) for admin_id in sorted(ADMIN_IDS)) or "не заданы"
+        await callback.answer(
+            f"ADMIN_IDS: {env_admins}",
+            show_alert=True,
+        )
+        return

@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from models import async_session, User, Achievement, UserAchievement, Title, UserTitle
 from utils.achievement_data import ACHIEVEMENTS, TITLES
+from utils.pvp_progression import apply_experience_with_pvp_rolls
 
 router = Router()
 
@@ -322,7 +323,7 @@ async def check_achievements(user_id: int, achievement_type: str, value: int = 1
                     ua.completed_at = datetime.utcnow()
                     
                     # Выдаем награды
-                    user.add_experience(ua.achievement.exp_reward)
+                    await apply_experience_with_pvp_rolls(session, user, ua.achievement.exp_reward)
                     user.points += ua.achievement.points_reward
                     
                     # Выдаем титул если есть

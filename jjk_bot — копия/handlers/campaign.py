@@ -1,143 +1,196 @@
+import html
+import random
+from datetime import datetime
+
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-import random
 
-from models import async_session, User, CampaignSeason, CampaignLevel, UserCampaignProgress, Card, UserCard
-from utils.campaign_data import CAMPAIGN_SEASONS, CAMPAIGN_LEVELS, get_season_levels
+from models import (
+    async_session,
+    User,
+    UserCard,
+    CampaignSeason,
+    CampaignLevel,
+    UserCampaignProgress,
+)
+from utils.campaign_data import CAMPAIGN_SEASONS, get_season_levels
+from utils.card_rewards import get_card_data_by_name, grant_card_to_user
+from utils.daily_quest_progress import add_daily_quest_progress
+from utils.pvp_progression import apply_experience_with_pvp_rolls
 
 router = Router()
 
+
+def _campaign_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="▶️ Открыть кампанию", callback_data="campaign")]
+        ]
+    )
+
+
+async def _safe_edit_message(
+    callback: CallbackQuery,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        try:
+            await callback.bot.send_message(
+                callback.from_user.id,
+                text,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
+async def _sync_campaign_templates(session):
+    """Create/update campaign templates to overwrite old corrupted text in DB."""
+    for season_data in CAMPAIGN_SEASONS:
+        result = await session.execute(
+            select(CampaignSeason).where(CampaignSeason.season_number == season_data["season_number"])
+        )
+        season = result.scalar_one_or_none()
+        if not season:
+            season = CampaignSeason(season_number=season_data["season_number"])
+            session.add(season)
+            await session.flush()
+
+        season.name = season_data["name"]
+        season.description = season_data["description"]
+        season.required_level = season_data["required_level"]
+        season.exp_reward = season_data["exp_reward"]
+        season.points_reward = season_data["points_reward"]
+        season.card_reward = season_data.get("card_reward")
+        season.is_active = True
+        await session.flush()
+
+        levels_data = get_season_levels(season_data["season_number"])
+        result = await session.execute(
+            select(CampaignLevel).where(CampaignLevel.season_id == season.id)
+        )
+        existing_level_rows = result.scalars().all()
+        grouped = {}
+        for lvl in existing_level_rows:
+            grouped.setdefault(lvl.level_number, []).append(lvl)
+
+        existing_levels = {}
+        for level_number, rows in grouped.items():
+            rows_sorted = sorted(rows, key=lambda row: row.id)
+            existing_levels[level_number] = rows_sorted[0]
+            for duplicate in rows_sorted[1:]:
+                await session.delete(duplicate)
+
+        for idx, level_data in enumerate(levels_data, start=1):
+            level = existing_levels.get(idx)
+            if not level:
+                level = CampaignLevel(season_id=season.id, level_number=idx)
+                session.add(level)
+
+            level.name = level_data["name"]
+            level.description = level_data["description"]
+            level.level_type = level_data["level_type"]
+            level.enemy_name = level_data.get("enemy_name")
+            level.enemy_attack = level_data.get("enemy_attack", 10)
+            level.enemy_defense = level_data.get("enemy_defense", 10)
+            level.enemy_speed = level_data.get("enemy_speed", 10)
+            level.enemy_hp = level_data.get("enemy_hp", 100)
+            level.exp_reward = level_data["exp_reward"]
+            level.points_reward = level_data["points_reward"]
+            level.coins_reward = level_data["coins_reward"]
+            level.card_drop_chance = level_data.get("card_drop_chance", 0)
+            level.card_drop_name = level_data.get("card_drop_name")
+
+    await session.commit()
+
+
 @router.message(Command("campaign"))
 async def cmd_campaign(message: Message):
-    """Команда /campaign"""
     await message.answer(
         "📖 <b>Сюжетная кампания</b>\n\n"
         "Нажми кнопку ниже, чтобы открыть кампанию.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Открыть кампанию", callback_data="campaign")]
-        ]),
-        parse_mode="HTML"
+        reply_markup=_campaign_menu_keyboard(),
+        parse_mode="HTML",
     )
+
 
 @router.callback_query(F.data == "campaign")
 async def campaign_menu_callback(callback: CallbackQuery):
-    """Меню сюжетной кампании"""
     async with async_session() as session:
         result = await session.execute(
             select(User).where(User.telegram_id == callback.from_user.id)
         )
         user = result.scalar_one_or_none()
-        
         if not user:
             await callback.answer("Сначала используй /start", show_alert=True)
             return
-        
-        # Инициализируем сезоны если нужно
-        for season_data in CAMPAIGN_SEASONS:
-            result = await session.execute(
-                select(CampaignSeason).where(CampaignSeason.season_number == season_data["season_number"])
-            )
-            season = result.scalar_one_or_none()
-            
-            if not season:
-                season = CampaignSeason(
-                    name=season_data["name"],
-                    description=season_data["description"],
-                    season_number=season_data["season_number"],
-                    required_level=season_data["required_level"],
-                    exp_reward=season_data["exp_reward"],
-                    points_reward=season_data["points_reward"],
-                    card_reward=season_data.get("card_reward")
-                )
-                session.add(season)
-                await session.flush()
-                
-                # Добавляем уровни сезона
-                levels = get_season_levels(season_data["season_number"])
-                for level_data in levels:
-                    level = CampaignLevel(
-                        season_id=season.id,
-                        level_number=levels.index(level_data) + 1,
-                        name=level_data["name"],
-                        description=level_data["description"],
-                        level_type=level_data["level_type"],
-                        enemy_name=level_data.get("enemy_name"),
-                        enemy_attack=level_data.get("enemy_attack", 10),
-                        enemy_defense=level_data.get("enemy_defense", 10),
-                        enemy_speed=level_data.get("enemy_speed", 10),
-                        enemy_hp=level_data.get("enemy_hp", 100),
-                        exp_reward=level_data["exp_reward"],
-                        points_reward=level_data["points_reward"],
-                        coins_reward=level_data["coins_reward"],
-                        card_drop_chance=level_data.get("card_drop_chance", 0),
-                        card_drop_name=level_data.get("card_drop_name")
-                    )
-                    session.add(level)
-        
-        await session.commit()
-        
-        # Получаем все сезоны
+
+        await _sync_campaign_templates(session)
+
         result = await session.execute(
             select(CampaignSeason)
             .options(selectinload(CampaignSeason.levels))
             .order_by(CampaignSeason.season_number)
         )
         seasons = result.scalars().all()
-        
-        # Получаем прогресс пользователя
+
         result = await session.execute(
-            select(UserCampaignProgress)
-            .where(UserCampaignProgress.user_id == user.id)
+            select(UserCampaignProgress).where(UserCampaignProgress.user_id == user.id)
         )
-        progress = result.scalars().all()
-        completed_levels = [p.level_id for p in progress if p.completed]
-        
-        campaign_text = (
-            f"📖 <b>Сюжетная Кампания</b>\n\n"
+        completed_level_ids = {p.level_id for p in result.scalars().all() if p.completed}
+
+        text = (
+            f"📖 <b>Сюжетная кампания</b>\n\n"
             f"👤 Твой уровень: <b>{user.level}</b>\n\n"
-            f"<b>Доступные сезоны:</b>\n\n"
+            "<b>Доступные сезоны:</b>\n\n"
         )
-        
         buttons = []
-        
+
         for season in seasons:
-            # Считаем прогресс
-            season_levels = [l for l in season.levels]
-            completed_in_season = len([l for l in season_levels if l.id in completed_levels])
+            season_levels = list(season.levels)
+            completed_in_season = len([lvl for lvl in season_levels if lvl.id in completed_level_ids])
             total_in_season = len(season_levels)
-            
-            # Проверяем доступность
+
             if user.level >= season.required_level:
-                status = "✅" if completed_in_season == total_in_season else "🟢"
-                campaign_text += f"{status} <b>{season.name}</b>\n"
-                campaign_text += f"   Прогресс: {completed_in_season}/{total_in_season}\n"
-                
-                buttons.append([
-                    InlineKeyboardButton(
-                        text=f"▶️ {season.name[:20]}",
-                        callback_data=f"season_{season.id}"
-                    )
-                ])
+                icon = "✅" if total_in_season > 0 and completed_in_season == total_in_season else "🟢"
+                text += (
+                    f"{icon} <b>{html.escape(season.name)}</b>\n"
+                    f"   Прогресс: {completed_in_season}/{total_in_season}\n"
+                )
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"▶️ {season.name[:24]}",
+                            callback_data=f"season_{season.id}",
+                        )
+                    ]
+                )
             else:
-                campaign_text += f"🔒 <b>{season.name}</b> (Требуется уровень {season.required_level})\n"
-        
+                text += (
+                    f"🔒 <b>{html.escape(season.name)}</b> "
+                    f"(нужен уровень {season.required_level})\n"
+                )
+
         buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
-        
-        await callback.message.edit_text(
-            campaign_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-            parse_mode="HTML"
+        await _safe_edit_message(
+            callback,
+            text,
+            InlineKeyboardMarkup(inline_keyboard=buttons),
         )
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("season_"))
 async def season_detail_callback(callback: CallbackQuery):
-    """Детали сезона"""
     season_id = int(callback.data.split("_")[1])
-    
+
     async with async_session() as session:
         result = await session.execute(
             select(CampaignSeason)
@@ -145,72 +198,83 @@ async def season_detail_callback(callback: CallbackQuery):
             .where(CampaignSeason.id == season_id)
         )
         season = result.scalar_one_or_none()
-        
         if not season:
-            await callback.answer("Сезон не найден!", show_alert=True)
+            await callback.answer("Сезон не найден.", show_alert=True)
             return
-        
+
         result = await session.execute(
             select(User).where(User.telegram_id == callback.from_user.id)
         )
         user = result.scalar_one_or_none()
-        
-        # Получаем прогресс
+        if not user:
+            await callback.answer("Сначала используй /start", show_alert=True)
+            return
+
+        if user.level < season.required_level:
+            await callback.answer(
+                f"Нужен уровень {season.required_level} для этого сезона.",
+                show_alert=True,
+            )
+            return
+
         result = await session.execute(
             select(UserCampaignProgress)
             .where(UserCampaignProgress.user_id == user.id)
         )
-        progress = {p.level_id: p for p in result.scalars().all()}
-        
-        season_text = (
-            f"📖 <b>{season.name}</b>\n\n"
-            f"<i>{season.description}</i>\n\n"
-            f"🎁 Награда за прохождение:\n"
+        progress_map = {p.level_id: p for p in result.scalars().all()}
+
+        levels_sorted = sorted(season.levels, key=lambda lvl: lvl.level_number)
+        text = (
+            f"📚 <b>{html.escape(season.name)}</b>\n\n"
+            f"<i>{html.escape(season.description or '')}</i>\n\n"
+            "🎁 Награда за сезон:\n"
             f"⭐ {season.exp_reward} опыта\n"
             f"💎 {season.points_reward} очков\n"
         )
-        
         if season.card_reward:
-            season_text += f"🎴 Карта: {season.card_reward}\n"
-        
-        season_text += f"\n<b>Уровни:</b>\n"
-        
+            text += f"🎴 Карта: {html.escape(season.card_reward)}\n"
+
+        text += "\n<b>Уровни:</b>\n"
         buttons = []
-        
-        for level in sorted(season.levels, key=lambda x: x.level_number):
-            level_progress = progress.get(level.id)
-            
-            if level_progress and level_progress.completed:
+
+        for level in levels_sorted:
+            level_progress = progress_map.get(level.id)
+            completed = bool(level_progress and level_progress.completed)
+            prev_levels = [lv for lv in levels_sorted if lv.level_number < level.level_number]
+            unlocked = level.level_number == 1 or all(
+                progress_map.get(prev.id) and progress_map[prev.id].completed for prev in prev_levels
+            )
+
+            if completed:
                 status = "✅"
-            elif level.level_number == 1 or (level.level_number > 1 and 
-                   all(progress.get(l.id) and progress[l.id].completed 
-                       for l in season.levels if l.level_number < level.level_number)):
+            elif unlocked:
                 status = "🟢"
-                buttons.append([
-                    InlineKeyboardButton(
-                        text=f"▶️ {level.name[:25]}",
-                        callback_data=f"campaign_level_{level.id}"
-                    )
-                ])
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"▶️ {level.level_number}. {level.name[:22]}",
+                            callback_data=f"campaign_level_{level.id}",
+                        )
+                    ]
+                )
             else:
                 status = "🔒"
-            
-            season_text += f"{status} {level.level_number}. {level.name}\n"
-        
+
+            text += f"{status} {level.level_number}. {html.escape(level.name)}\n"
+
         buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="campaign")])
-        
-        await callback.message.edit_text(
-            season_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-            parse_mode="HTML"
+        await _safe_edit_message(
+            callback,
+            text,
+            InlineKeyboardMarkup(inline_keyboard=buttons),
         )
     await callback.answer()
 
+
 @router.callback_query(F.data.startswith("campaign_level_"))
 async def campaign_level_callback(callback: CallbackQuery):
-    """Начать уровень кампании"""
     level_id = int(callback.data.split("_")[2])
-    
+
     async with async_session() as session:
         result = await session.execute(
             select(CampaignLevel)
@@ -218,180 +282,177 @@ async def campaign_level_callback(callback: CallbackQuery):
             .where(CampaignLevel.id == level_id)
         )
         level = result.scalar_one_or_none()
-        
         if not level:
-            await callback.answer("Уровень не найден!", show_alert=True)
+            await callback.answer("Уровень не найден.", show_alert=True)
             return
-        
+
         result = await session.execute(
             select(User).where(User.telegram_id == callback.from_user.id)
         )
         user = result.scalar_one_or_none()
-        
-        # Получаем карты пользователя
+        if not user:
+            await callback.answer("Сначала используй /start", show_alert=True)
+            return
+
         result = await session.execute(
             select(UserCard)
             .options(selectinload(UserCard.card_template))
-            .where(UserCard.user_id == user.id, UserCard.is_equipped == True)
+            .where(UserCard.id == user.slot_1_card_id, UserCard.user_id == user.id)
         )
-        equipped_cards = result.scalars().all()
-        
-        if not equipped_cards:
-            await callback.answer("У тебя нет экипированных карт!", show_alert=True)
+        main_card = result.scalar_one_or_none()
+        if not main_card or not main_card.card_template:
+            await callback.answer("Экипируй главную карту перед боем.", show_alert=True)
             return
-        
-        # Простая боевая система для кампании
-        main_card = [c for c in equipped_cards if c.slot_number == 1]
-        if not main_card:
-            main_card = equipped_cards[0]
-        else:
-            main_card = main_card[0]
-        
-        # Бой
-        player_hp = main_card.max_hp
-        enemy_hp = level.enemy_hp
-        
-        battle_log = []
-        
-        # Определяем первого
-        player_speed = main_card.speed
-        enemy_speed = level.enemy_speed
-        
-        while player_hp > 0 and enemy_hp > 0:
-            if player_speed >= enemy_speed:
-                # Игрок атакует
-                damage = max(1, main_card.attack - level.enemy_defense // 2)
-                enemy_hp -= damage
-                battle_log.append(f"⚔️ Ты нанес {damage} урона!")
-                
-                if enemy_hp <= 0:
-                    break
-                
-                # Враг атакует
-                damage = max(1, level.enemy_attack - main_card.defense // 2)
-                player_hp -= damage
-                battle_log.append(f"💥 {level.enemy_name} нанес {damage} урона!")
-            else:
-                # Враг первый
-                damage = max(1, level.enemy_attack - main_card.defense // 2)
-                player_hp -= damage
-                battle_log.append(f"💥 {level.enemy_name} нанес {damage} урона!")
-                
-                if player_hp <= 0:
-                    break
-                
-                # Игрок атакует
-                damage = max(1, main_card.attack - level.enemy_defense // 2)
-                enemy_hp -= damage
-                battle_log.append(f"⚔️ Ты нанес {damage} урона!")
-        
-        won = player_hp > 0
-        
-        # Обновляем прогресс
+
+        season_levels = sorted(level.season.levels, key=lambda lvl: lvl.level_number)
         result = await session.execute(
             select(UserCampaignProgress)
-            .where(
+            .where(UserCampaignProgress.user_id == user.id)
+        )
+        progress_map = {p.level_id: p for p in result.scalars().all()}
+
+        prev_levels = [lv for lv in season_levels if lv.level_number < level.level_number]
+        unlocked = level.level_number == 1 or all(
+            progress_map.get(prev.id) and progress_map[prev.id].completed for prev in prev_levels
+        )
+        if not unlocked:
+            await callback.answer("Сначала пройди предыдущие уровни сезона.", show_alert=True)
+            return
+
+        # Simple auto-battle for campaign encounter.
+        player_hp = main_card.max_hp
+        enemy_hp = level.enemy_hp
+        player_speed = main_card.speed
+        enemy_speed = level.enemy_speed
+
+        while player_hp > 0 and enemy_hp > 0:
+            if player_speed >= enemy_speed:
+                enemy_hp -= max(1, main_card.attack - level.enemy_defense // 2)
+                if enemy_hp <= 0:
+                    break
+                player_hp -= max(1, level.enemy_attack - main_card.defense // 2)
+            else:
+                player_hp -= max(1, level.enemy_attack - main_card.defense // 2)
+                if player_hp <= 0:
+                    break
+                enemy_hp -= max(1, main_card.attack - level.enemy_defense // 2)
+
+        won = player_hp > 0
+
+        result = await session.execute(
+            select(UserCampaignProgress).where(
                 UserCampaignProgress.user_id == user.id,
-                UserCampaignProgress.level_id == level.id
+                UserCampaignProgress.level_id == level.id,
             )
         )
         progress = result.scalar_one_or_none()
-        
         if not progress:
-            progress = UserCampaignProgress(
-                user_id=user.id,
-                level_id=level.id
-            )
+            progress = UserCampaignProgress(user_id=user.id, level_id=level.id)
             session.add(progress)
-        
-        progress.attempts += 1
-        
-        card_dropped = False
 
-        if won and not progress.completed:
-            progress.completed = True
-            progress.completed_at = datetime.utcnow()
-            
-            # Награды
-            user.add_experience(level.exp_reward)
-            user.points += level.points_reward
-            user.coins += level.coins_reward
-            
-            # Шанс на карту
-            if level.card_drop_name and random.random() * 100 < level.card_drop_chance:
-                card_dropped = True
-                # Создаем карту
-                result = await session.execute(
-                    select(Card).where(Card.name == level.card_drop_name)
-                )
-                card_template = result.scalar_one_or_none()
-                
-                if card_template:
-                    user_card = UserCard(
-                        user_id=user.id,
-                        card_id=card_template.id,
-                        level=1
-                    )
-                    user_card.recalculate_stats()
-                    session.add(user_card)
-        
-        await session.commit()
-        
-        # Результат
+        progress.attempts = int(progress.attempts or 0) + 1
+
+        level_exp = 0
+        level_points = 0
+        level_coins = 0
+        season_exp = 0
+        season_points = 0
+        dropped_card_name = None
+        season_card_name = None
+        unlocked_techniques = []
+        season_completed_now = False
+
         if won:
-            result_text = (
-                f"🏆 <b>Победа!</b>\n\n"
-                f"Ты победил <b>{level.enemy_name}</b>!\n\n"
-                f"⭐ Опыт: +{level.exp_reward}\n"
-                f"💎 Очки: +{level.points_reward}\n"
-                f"🪙 Монеты: +{level.coins_reward}\n"
+            completed_before = {lid for lid, p in progress_map.items() if p.completed}
+            first_clear = not progress.completed
+            if first_clear:
+                progress.completed = True
+                progress.completed_at = datetime.utcnow()
+                completed_after = set(completed_before)
+                completed_after.add(level.id)
+            else:
+                completed_after = completed_before
+
+            # Reward every victory (fixes "reward not credited"), first clear is still tracked separately.
+            _, level_exp, unlocked_from_level = await apply_experience_with_pvp_rolls(
+                session, user, int(level.exp_reward)
             )
-            
-            if card_dropped:
-                result_text += f"🎴 <b>Получена карта: {level.card_drop_name}!</b>\n"
-            
-            # Проверяем, все ли уровни сезона пройдены
-            result = await session.execute(
-                select(UserCampaignProgress)
-                .where(
-                    UserCampaignProgress.user_id == user.id,
-                    UserCampaignProgress.completed == True
+            unlocked_techniques.extend(unlocked_from_level)
+            level_points = int(level.points_reward)
+            level_coins = int(level.coins_reward)
+            user.points += level_points
+            user.coins += level_coins
+
+            await add_daily_quest_progress(session, user.id, "campaign_levels", amount=1)
+
+            if level.card_drop_name and random.random() * 100 < float(level.card_drop_chance or 0):
+                card_data = get_card_data_by_name(level.card_drop_name)
+                if card_data:
+                    await grant_card_to_user(session, user.id, card_data, level=1)
+                    dropped_card_name = level.card_drop_name
+
+            season_level_ids = [lvl.id for lvl in season_levels]
+            was_complete_before = all(lid in completed_before for lid in season_level_ids)
+            is_complete_after = all(lid in completed_after for lid in season_level_ids)
+            season_completed_now = is_complete_after and not was_complete_before
+
+            if season_completed_now:
+                _, season_exp, unlocked_from_season = await apply_experience_with_pvp_rolls(
+                    session, user, int(level.season.exp_reward)
                 )
-            )
-            completed_level_ids = [p.level_id for p in result.scalars().all()]
-            
-            season_levels = [l.id for l in level.season.levels]
-            if all(lid in completed_level_ids for lid in season_levels):
-                # Сезон пройден!
-                result_text += f"\n🎉 <b>Сезон '{level.season.name}' пройден!</b>\n"
-                result_text += f"🎁 Бонус: {level.season.exp_reward} опыта\n"
-                
-                user.add_experience(level.season.exp_reward)
-                user.points += level.season.points_reward
-                
+                unlocked_techniques.extend(unlocked_from_season)
+                season_points = int(level.season.points_reward)
+                user.points += season_points
+
                 if level.season.card_reward:
-                    result_text += f"🎴 Карта: {level.season.card_reward}\n"
-        else:
-            result_text = (
-                f"💀 <b>Поражение...</b>\n\n"
-                f"{level.enemy_name} оказался сильнее.\n"
-                f"Попробуй прокачать карты и вернись!"
+                    season_card_data = get_card_data_by_name(level.season.card_reward)
+                    if season_card_data:
+                        await grant_card_to_user(session, user.id, season_card_data, level=1)
+                        season_card_name = level.season.card_reward
+
+        await session.commit()
+
+        if won:
+            text = (
+                "🏆 <b>Победа!</b>\n\n"
+                f"Ты победил <b>{html.escape(level.enemy_name or 'врага')}</b>.\n\n"
+                f"⭐ Опыт: +{level_exp}\n"
+                f"💎 Очки: +{level_points}\n"
+                f"🪙 Монеты: +{level_coins}\n"
             )
-        
-        result_text += f"\n📊 Попыток: {progress.attempts}"
-        
-        await callback.message.edit_text(
-            result_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="🔄 Повторить", callback_data=f"campaign_level_{level.id}"),
-                    InlineKeyboardButton(text="📖 К сезону", callback_data=f"season_{level.season_id}")
-                ],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
-            ]),
-            parse_mode="HTML"
+            if dropped_card_name:
+                text += f"🎴 Дроп карты: <b>{html.escape(dropped_card_name)}</b>\n"
+            if season_completed_now:
+                text += (
+                    f"\n🎉 <b>Сезон «{html.escape(level.season.name)}» пройден!</b>\n"
+                    f"⭐ Бонус опыта: +{season_exp}\n"
+                    f"💎 Бонус очков: +{season_points}\n"
+                )
+                if season_card_name:
+                    text += f"🎴 Карта за сезон: <b>{html.escape(season_card_name)}</b>\n"
+            if unlocked_techniques:
+                names = ", ".join(sorted({tech.name for tech in unlocked_techniques}))
+                text += f"\n✨ Новые PvP-техники: {html.escape(names)}\n"
+        else:
+            text = (
+                "💀 <b>Поражение</b>\n\n"
+                f"{html.escape(level.enemy_name or 'Враг')} оказался сильнее.\n"
+                "Прокачай карты и попробуй снова."
+            )
+
+        text += f"\n\n📊 Попыток на уровне: {progress.attempts}"
+
+        await _safe_edit_message(
+            callback,
+            text,
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🔄 Повторить", callback_data=f"campaign_level_{level.id}"),
+                        InlineKeyboardButton(text="📚 К сезону", callback_data=f"season_{level.season_id}"),
+                    ],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
+                ]
+            ),
         )
     await callback.answer()
-
-
-from datetime import datetime

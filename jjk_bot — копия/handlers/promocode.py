@@ -5,9 +5,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from datetime import datetime
 
-from models import async_session, User, PromoCode, UserPromoCode, Card, UserCard, Technique, UserTechnique
-from utils.card_data import ALL_CARDS
+from models import async_session, User, PromoCode, UserPromoCode, Technique, UserTechnique
 from utils.technique_data import ALL_TECHNIQUES
+from utils.pvp_progression import apply_experience_with_pvp_rolls
+from utils.card_rewards import get_card_data_by_name, grant_card_to_user
 
 router = Router()
 
@@ -94,9 +95,12 @@ async def cmd_promo(message: Message):
         reward_text = f"🎉 <b>Промокод активирован!</b>\n\n"
         reward_text += f"<i>{promo.description or 'Награды:'}</i>\n\n"
         
+        unlocked_from_level = []
         if promo.exp_reward > 0:
-            user.add_experience(promo.exp_reward)
-            reward_text += f"⭐ Опыт: +{promo.exp_reward}\n"
+            _, actual_exp, unlocked_from_level = await apply_experience_with_pvp_rolls(
+                session, user, promo.exp_reward
+            )
+            reward_text += f"⭐ Опыт: +{actual_exp}\n"
         
         if promo.points_reward > 0:
             user.points += promo.points_reward
@@ -108,42 +112,10 @@ async def cmd_promo(message: Message):
         
         # Карта
         if promo.card_reward:
-            # Ищем карту
-            card_data = None
-            for c in ALL_CARDS:
-                if c["name"] == promo.card_reward:
-                    card_data = c
-                    break
+            card_data = get_card_data_by_name(promo.card_reward)
             
             if card_data:
-                result = await session.execute(
-                    select(Card).where(Card.name == card_data["name"])
-                )
-                card_template = result.scalar_one_or_none()
-                
-                if not card_template:
-                    card_template = Card(
-                        name=card_data["name"],
-                        description=card_data["description"],
-                        card_type="character" if card_data in [c for c in ALL_CARDS if c.get("base_attack", 0) > 50] else "support",
-                        rarity=card_data["rarity"],
-                        base_attack=card_data["base_attack"],
-                        base_defense=card_data["base_defense"],
-                        base_speed=card_data["base_speed"],
-                        base_hp=card_data["base_hp"],
-                        growth_multiplier=card_data["growth_multiplier"]
-                    )
-                    session.add(card_template)
-                    await session.flush()
-                
-                user_card = UserCard(
-                    user_id=user.id,
-                    card_id=card_template.id,
-                    level=1
-                )
-                user_card.recalculate_stats()
-                session.add(user_card)
-                
+                await grant_card_to_user(session, user.id, card_data, level=1)
                 reward_text += f"🎴 Карта: <b>{card_data['name']}</b>\n"
         
         # Техника
@@ -195,6 +167,10 @@ async def cmd_promo(message: Message):
         promo.current_uses += 1
         
         await session.commit()
+        
+        if unlocked_from_level:
+            unlocked_names = ", ".join(t.name for t in unlocked_from_level)
+            reward_text += f"\n✨ Новые PvP-техники: {unlocked_names}\n"
         
         reward_text += "\n✅ <b>Награды начислены!</b>"
         

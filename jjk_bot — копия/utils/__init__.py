@@ -40,6 +40,29 @@ from .daily_quest_data import (
     get_quests_by_difficulty,
     get_random_quests
 )
+from .card_rewards import (
+    CHARACTER_CARD_NAMES,
+    get_card_data_by_name,
+    get_card_type_by_name,
+    is_character_template,
+    is_support_template,
+    roll_random_card_data,
+    get_or_create_card_template,
+    grant_card_to_user,
+    grant_random_card,
+)
+from .quote_data import (
+    CARD_QUOTES,
+    FALLBACK_QUOTES,
+    get_quotes_for_card,
+)
+from .quote_rewards import (
+    grant_quote_for_card,
+    ensure_quotes_for_owned_cards,
+)
+from .daily_quest_progress import (
+    add_daily_quest_progress,
+)
 
 __all__ = [
     'ALL_CARDS',
@@ -71,5 +94,20 @@ __all__ = [
     'get_season_by_number',
     'DAILY_QUESTS',
     'get_quests_by_difficulty',
-    'get_random_quests'
+    'get_random_quests',
+    'CHARACTER_CARD_NAMES',
+    'get_card_data_by_name',
+    'get_card_type_by_name',
+    'is_character_template',
+    'is_support_template',
+    'roll_random_card_data',
+    'get_or_create_card_template',
+    'grant_card_to_user',
+    'grant_random_card',
+    'CARD_QUOTES',
+    'FALLBACK_QUOTES',
+    'get_quotes_for_card',
+    'grant_quote_for_card',
+    'ensure_quotes_for_owned_cards',
+    'add_daily_quest_progress',
 ]

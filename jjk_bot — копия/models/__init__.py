@@ -9,6 +9,7 @@ from .daily import DailyReward, DailyQuest, UserDailyQuest, UserStats
 from .campaign import CampaignSeason, CampaignLevel, UserCampaignProgress, BossBattle, UserBossAttempt
 from .technique import Technique, UserTechnique, AcademyLesson, UserAcademyVisit, PromoCode, UserPromoCode
 from .market import MarketListing, TradeOffer, CoinTransaction
+from .profile_customization import UserProfile, UserQuote
 
 __all__ = [
     'Base',
@@ -39,6 +40,8 @@ __all__ = [
     'UserAcademyVisit',
     'PromoCode',
     'UserPromoCode',
+    'UserProfile',
+    'UserQuote',
     'MarketListing',
     'TradeOffer',
     'CoinTransaction'

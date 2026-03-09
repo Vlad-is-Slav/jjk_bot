@@ -6,6 +6,8 @@ from sqlalchemy.orm import selectinload
 
 from models import async_session, User, UserCard, UserTechnique
 from keyboards import get_inventory_menu, get_card_list_keyboard, get_card_detail_keyboard, get_upgrade_keyboard, get_back_button
+from utils.card_rewards import is_character_template, is_support_template
+from utils.daily_quest_progress import add_daily_quest_progress
 
 router = Router()
 
@@ -260,7 +262,7 @@ async def equip_card_callback(callback: CallbackQuery):
             await callback.answer("Карта не найдена!", show_alert=True)
             return
 
-        is_main = card.card_template.card_type == "character"
+        is_main = is_character_template(card.card_template)
         slot_number = 1 if is_main else 2
 
         old_slot_card_id = user.slot_1_card_id if is_main else user.slot_2_card_id
@@ -321,6 +323,7 @@ async def confirm_upgrade_callback(callback: CallbackQuery):
         user.points -= card.upgrade_cost
         old_level = card.level
         card.upgrade()
+        await add_daily_quest_progress(session, user.id, "upgrade_cards", amount=1)
         
         await session.commit()
         
@@ -354,7 +357,7 @@ async def character_cards_callback(callback: CallbackQuery):
         )
         cards = result.scalars().all()
         
-        character_cards = [c for c in cards if c.card_template and c.card_template.card_type == "character"]
+        character_cards = [c for c in cards if c.card_template and is_character_template(c.card_template)]
         
         if not character_cards:
             await callback.message.edit_text(
@@ -394,7 +397,7 @@ async def support_cards_callback(callback: CallbackQuery):
         )
         cards = result.scalars().all()
         
-        support_cards = [c for c in cards if c.card_template and c.card_template.card_type in ["support", "weapon"]]
+        support_cards = [c for c in cards if c.card_template and is_support_template(c.card_template)]
         
         if not support_cards:
             await callback.message.edit_text(

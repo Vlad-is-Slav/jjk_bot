@@ -27,13 +27,127 @@ CHARACTER_CARDS = [
         "growth_multiplier": 1.15
     },
     {
-        "name": "Гето Сугуру",
-        "description": "Маг-проклятие. Владелец Кражи духов.",
-        "rarity": "epic",
-        "base_attack": 85,
-        "base_defense": 70,
-        "base_speed": 75,
+        "name": "Хигурума",
+        "description": "Судья",
+        "rarity": "legendary",
+        "base_attack": 75,
+        "base_defense": 60,
+        "base_speed": 70,
         "base_hp": 120,
+        "growth_multiplier": 1.15
+    },
+    {
+        "name": "Кэндзяку",
+        "description": "Древний маг в теле Гето. Мастер барьеров и манипуляции проклятиями.",
+        "rarity": "legendary",
+        "base_attack": 90,
+        "base_defense": 92,
+        "base_speed": 85,
+        "base_hp": 140,
+        "growth_multiplier": 1.18
+    },
+    {
+        "name": "Юки Цукумо",
+        "description": "Маг особого ранга. Техника 'Звездная ярость' дает ей виртуальную массу.",
+        "rarity": "legendary",
+        "base_attack": 97, # Один удар может быть фатальным
+        "base_defense": 80,
+        "base_speed": 82,
+        "base_hp": 135,
+        "growth_multiplier": 1.17
+    },
+    {
+        "name": "Йорозу",
+        "description": "Маг эпохи Хэйан. Использует 'Жидкую металлическую броню' и идеальную сферу.",
+        "rarity": "legendary",
+        "base_attack": 93,
+        "base_defense": 95,
+        "base_speed": 88,
+        "base_hp": 130,
+        "growth_multiplier": 1.16
+    },
+    {
+        "name": "Тодзи Фушигуро",
+        "description": "Убийца магов. Обладает Небесным ограничением и полным отсутствием проклятой энергии.",
+        "rarity": "legendary",
+        "base_attack": 96,
+        "base_defense": 82,
+        "base_speed": 100, # Быстрее почти всех во вселенной
+        "base_hp": 145,
+        "growth_multiplier": 1.18
+    },
+    {
+        "name": "Хадзимэ Кашимо",
+        "description": "Сильнейший маг своей эпохи. Его проклятая энергия подобна электрическому разряду.",
+        "rarity": "legendary",
+        "base_attack": 94,
+        "base_defense": 78,
+        "base_speed": 92,
+        "base_hp": 130,
+        "growth_multiplier": 1.16
+    },
+
+    # Epic (Уровень стихийных бедствий и элиты)
+    {
+        "name": "Джого",
+        "description": "Проклятие человеческого страха перед огнем и вулканами. Невероятная мощь атаки.",
+        "rarity": "epic",
+        "base_attack": 92,
+        "base_defense": 50, # Канонично: высокая атака, но «стеклянная пушка»
+        "base_speed": 88,
+        "base_hp": 90,
+        "growth_multiplier": 1.14
+    },
+    {
+        "name": "Мэй Мэй",
+        "description": "Маг 1-го ранга. Мастерски владеет топором и техникой манипуляции воронами.",
+        "rarity": "epic",
+        "base_attack": 84,
+        "base_defense": 75,
+        "base_speed": 78,
+        "base_hp": 115,
+        "growth_multiplier": 1.12
+    },
+    {
+        "name": "Наоя Дзэнин",
+        "description": "Глава элитного отряда 'Кукуру'. Техника Проекции делает его сверхзвуковым.",
+        "rarity": "epic",
+        "base_attack": 80,
+        "base_defense": 70,
+        "base_speed": 98, # Один из самых высоких показателей скорости
+        "base_hp": 105,
+        "growth_multiplier": 1.13
+    },
+
+    # Rare (Надежные бойцы поддержки и проклятия)
+    {
+        "name": "Ханами",
+        "description": "Проклятие лесов. Обладает невероятной прочностью тела.",
+        "rarity": "rare",
+        "base_attack": 72,
+        "base_defense": 95, # Очень высокий показатель защиты
+        "base_speed": 65,
+        "base_hp": 140,
+        "growth_multiplier": 1.10
+    },
+    {
+        "name": "Кусакабэ Ацуя",
+        "description": "Сильнейший маг 1-го ранга среди тех, у кого нет врожденной техники. Мастер Катаны.",
+        "rarity": "rare",
+        "base_attack": 76,
+        "base_defense": 88, # Мастер защиты простым барьером
+        "base_speed": 74,
+        "base_hp": 110,
+        "growth_multiplier": 1.11
+    },
+    {
+        "name": "Ураумэ",
+        "description": "Верный последователь Сукуны. Техника Ледяного строя.",
+        "rarity": "rare",
+        "base_attack": 82,
+        "base_defense": 74,
+        "base_speed": 76,
+        "base_hp": 100,
         "growth_multiplier": 1.12
     },
     {

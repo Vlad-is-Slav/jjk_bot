@@ -1,5 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import List
+from utils.card_rewards import is_character_template, is_support_template
 
 def get_card_list_keyboard(cards: List, page: int = 0, cards_per_page: int = 5):
     """Клавиатура списка карт с пагинацией"""
@@ -17,7 +18,7 @@ def get_card_list_keyboard(cards: List, page: int = 0, cards_per_page: int = 5):
             "rare": "🔵",
             "epic": "🟣",
             "legendary": "🟡",
-            "special": "🔴"
+            "mythical": "🔴"
         }.get(card.card_template.rarity, "⚪") if card.card_template else "⚪"
         
         buttons.append([
@@ -121,9 +122,9 @@ def get_card_selection_keyboard(cards: List, slot_type: str = "main", page: int 
     
     # Фильтруем карты по типу
     if slot_type == "main":
-        filtered_cards = [c for c in cards if c.card_template and c.card_template.card_type == "character"]
+        filtered_cards = [c for c in cards if c.card_template and is_character_template(c.card_template)]
     else:
-        filtered_cards = [c for c in cards if c.card_template and c.card_template.card_type in ["support", "weapon"]]
+        filtered_cards = [c for c in cards if c.card_template and is_support_template(c.card_template)]
     
     start = page * cards_per_page
     end = start + cards_per_page

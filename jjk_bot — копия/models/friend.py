@@ -8,8 +8,6 @@ class Friend(Base):
     __tablename__ = 'friends'
     
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer)
-    friend_id = Column(Integer)
     
     # Кто отправил заявку
     requester_id = Column(Integer, ForeignKey('users.id'), nullable=False)

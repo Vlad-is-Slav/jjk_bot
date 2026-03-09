@@ -1,33 +1,13 @@
-import random
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from sqlalchemy import select
 
-from models import async_session, User, Card, UserCard
+from models import async_session, User
 from keyboards import get_main_menu
-from utils.card_data import ALL_CARDS, RARITY_CHANCES
+from utils.card_rewards import grant_random_card
 
 router = Router()
-
-def get_random_card_by_rarity():
-    """Получить случайную карту с учетом шансов редкости"""
-    rand = random.uniform(0, 100)
-    cumulative = 0
-    selected_rarity = "common"
-    
-    for rarity, chance in RARITY_CHANCES.items():
-        cumulative += chance
-        if rand <= cumulative:
-            selected_rarity = rarity
-            break
-    
-    # Получаем карты этой редкости
-    cards_of_rarity = [c for c in ALL_CARDS if c["rarity"] == selected_rarity]
-    if not cards_of_rarity:
-        cards_of_rarity = [c for c in ALL_CARDS if c["rarity"] == "common"]
-    
-    return random.choice(cards_of_rarity)
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -52,45 +32,10 @@ async def cmd_start(message: Message):
             session.add(user)
             await session.flush()  # Получаем ID пользователя
             
-            # Выдаем стартовую карту
-            card_data = get_random_card_by_rarity()
-            
-            # Создаем шаблон карты если его нет
-            result = await session.execute(
-                select(Card).where(Card.name == card_data["name"])
-            )
-            card_template = result.scalar_one_or_none()
-            
-            if not card_template:
-                card_template = Card(
-                    name=card_data["name"],
-                    description=card_data["description"],
-                    card_type="character" if card_data in [c for c in ALL_CARDS if c.get("base_attack", 0) > 50] else "support",
-                    rarity=card_data["rarity"],
-                    base_attack=card_data["base_attack"],
-                    base_defense=card_data["base_defense"],
-                    base_speed=card_data["base_speed"],
-                    base_hp=card_data["base_hp"],
-                    growth_multiplier=card_data["growth_multiplier"]
-                )
-                session.add(card_template)
-                await session.flush()
-            
-            # Создаем карту пользователя
-            user_card = UserCard(
-                user_id=user.id,
-                card_id=card_template.id,
-                level=1,
-                attack=card_template.base_attack,
-                defense=card_template.base_defense,
-                speed=card_template.base_speed,
-                hp=card_template.base_hp,
-                max_hp=card_template.base_hp,
-                upgrade_cost=5,
-                is_equipped=True,
-                slot_number=1
-            )
-            session.add(user_card)
+            # Выдаем стартовую карту-персонажа
+            user_card = await grant_random_card(session, user.id, only_characters=True, level=1)
+            user_card.is_equipped = True
+            user_card.slot_number = 1
             await session.flush()
             
             user.slot_1_card_id = user_card.id
@@ -98,7 +43,7 @@ async def cmd_start(message: Message):
             await session.commit()
             
             is_new_user = True
-            starter_card = card_template
+            starter_card = user_card.card_template
         
         # Приветственное сообщение
         if is_new_user:

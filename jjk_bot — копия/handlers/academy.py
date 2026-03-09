@@ -5,8 +5,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 import random
 
-from models import async_session, User, AcademyLesson, UserAcademyVisit, Technique, UserTechnique
+from models import async_session, User, UserCard, AcademyLesson, UserAcademyVisit, Technique, UserTechnique
+from utils.daily_quest_progress import add_daily_quest_progress
 from utils.technique_data import ALL_TECHNIQUES
+from utils.pvp_progression import apply_experience_with_pvp_rolls, roll_pvp_technique_drop
 
 router = Router()
 
@@ -112,6 +114,7 @@ async def academy_learn_callback(callback: CallbackQuery):
         # Обновляем посещение
         visit.total_visits += 1
         visit.last_visit = datetime.utcnow()
+        await add_daily_quest_progress(session, user.id, "academy_visit", amount=1)
         
         # Определяем результат обучения
         outcomes = [
@@ -127,6 +130,8 @@ async def academy_learn_callback(callback: CallbackQuery):
             f"💰 Потрачено: {cost} монет\n\n"
         )
         
+        unlocked_from_levels = []
+
         if outcome == "technique":
             # Выдаем случайную технику
             available_techniques = [t for t in ALL_TECHNIQUES if t["rarity"] in ["common", "rare"]]
@@ -170,7 +175,8 @@ async def academy_learn_callback(callback: CallbackQuery):
                     f"Вместо этого ты получил бонус:\n"
                     f"⭐ 100 опыта\n"
                 )
-                user.add_experience(100)
+                _, _, level_unlocks = await apply_experience_with_pvp_rolls(session, user, 100)
+                unlocked_from_levels.extend(level_unlocks)
             else:
                 user_tech = UserTechnique(
                     user_id=user.id,
@@ -234,7 +240,8 @@ async def academy_learn_callback(callback: CallbackQuery):
                     f"📚 Ты усвоил знания!\n"
                     f"⭐ Получено 150 опыта\n"
                 )
-                user.add_experience(150)
+                _, _, level_unlocks = await apply_experience_with_pvp_rolls(session, user, 150)
+                unlocked_from_levels.extend(level_unlocks)
         
         else:  # nothing
             result_text += (
@@ -243,8 +250,17 @@ async def academy_learn_callback(callback: CallbackQuery):
                 f"Но ты получил немного опыта:\n"
                 f"⭐ 50 опыта\n"
             )
-            user.add_experience(50)
+            _, _, level_unlocks = await apply_experience_with_pvp_rolls(session, user, 50)
+            unlocked_from_levels.extend(level_unlocks)
         
+        unlocked_from_academy = await roll_pvp_technique_drop(
+            session, user, source="academy", attempts=1
+        )
+        unlocked_all = unlocked_from_levels + unlocked_from_academy
+        if unlocked_all:
+            unique_names = sorted({tech.name for tech in unlocked_all})
+            result_text += f"\nNew PvP techniques: {', '.join(unique_names)}\n"
+
         await session.commit()
         
         await callback.message.edit_text(

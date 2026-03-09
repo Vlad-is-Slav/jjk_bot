@@ -68,6 +68,8 @@ class User(Base):
     received_trades = relationship("TradeOffer", foreign_keys="TradeOffer.receiver_id", back_populates="receiver")
     battles_as_player1 = relationship("Battle", foreign_keys="Battle.player1_id", back_populates="player1")
     battles_as_player2 = relationship("Battle", foreign_keys="Battle.player2_id", back_populates="player2")
+    profile_settings = relationship("UserProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    quotes = relationship("UserQuote", back_populates="user", cascade="all, delete-orphan")
     
     def get_win_rate(self):
         """Получить процент побед в PvP"""

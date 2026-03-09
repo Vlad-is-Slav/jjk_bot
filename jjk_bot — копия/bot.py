@@ -58,39 +58,6 @@ dp.include_router(promocode_router)
 dp.include_router(admin_router)
 dp.include_router(market_router)
 
-@dp.message(F.text)
-async def gain_exp_from_messages(message: Message):
-    """Начисление опыта за обычные сообщения с кулдауном"""
-    if not message.from_user or message.from_user.is_bot:
-        return
-    if message.text and message.text.startswith("/"):
-        return
-
-    tg_id = message.from_user.id
-    now = datetime.utcnow()
-    last_time = exp_cooldowns.get(tg_id)
-    if last_time and (now - last_time).total_seconds() < EXP_COOLDOWN:
-        return
-
-    async with async_session() as session:
-        result = await session.execute(
-            select(User).where(User.telegram_id == tg_id)
-        )
-        user = result.scalar_one_or_none()
-        if not user:
-            return
-
-        leveled_up, actual_exp = user.add_experience(EXP_PER_MESSAGE)
-        await session.commit()
-        exp_cooldowns[tg_id] = now
-
-        if leveled_up:
-            await message.answer(
-                f"🎉 Новый уровень: <b>{user.level}</b>!\n"
-                f"⭐ Получено опыта: +{actual_exp}",
-                parse_mode="HTML"
-            )
-
 async def main():
     """Главная функция"""
     # Инициализируем БД

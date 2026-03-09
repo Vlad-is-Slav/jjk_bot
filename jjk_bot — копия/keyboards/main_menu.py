@@ -38,6 +38,9 @@ def get_profile_menu():
             InlineKeyboardButton(text="⚙️ Сложность", callback_data="difficulty_menu")
         ],
         [
+            InlineKeyboardButton(text="🖼️ Оформление", callback_data="profile_customization")
+        ],
+        [
             InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")
         ]
     ])

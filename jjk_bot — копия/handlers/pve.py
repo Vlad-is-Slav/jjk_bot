@@ -8,6 +8,9 @@ from sqlalchemy.orm import selectinload
 from models import async_session, User, UserCard, Curse, Battle
 from keyboards.pve import get_pve_menu, get_pve_battle_keyboard, get_pve_result_keyboard
 from utils.curse_data import get_curses_for_level, CURSES
+from utils.daily_quest_progress import add_daily_quest_progress
+from utils.pvp_progression import apply_experience_with_pvp_rolls
+from utils.card_rewards import grant_random_card
 
 router = Router()
 
@@ -383,9 +386,13 @@ async def end_pve_battle(callback: CallbackQuery, user_id: int, won: bool):
         if user:
             user.last_pve_battle_time = datetime.utcnow()
             user.total_battles += 1
+            await add_daily_quest_progress(session, user.id, "pve_battles", amount=1)
             
             if won:
                 user.pve_wins += 1
+                await add_daily_quest_progress(session, user.id, "pve_wins", amount=1)
+                if battle.get("difficulty") == "disaster":
+                    await add_daily_quest_progress(session, user.id, "disaster_wins", amount=1)
                 curse = battle["curse"]
                 
                 # Награды
@@ -404,11 +411,17 @@ async def end_pve_battle(callback: CallbackQuery, user_id: int, won: bool):
                     points_gained = int(points_gained * 2)
                 
                 # Добавляем опыт
-                leveled_up, actual_exp = user.add_experience(exp_gained)
+                leveled_up, actual_exp, unlocked_from_level = await apply_experience_with_pvp_rolls(
+                    session, user, exp_gained
+                )
                 user.points += points_gained
                 
                 # Шанс выпадения карты
-                card_dropped = random.random() * 100 < curse.card_drop_chance
+                card_dropped_name = None
+                if random.random() * 100 < curse.card_drop_chance:
+                    dropped_card = await grant_random_card(session, user.id, only_characters=False, level=1)
+                    if dropped_card and dropped_card.card_template:
+                        card_dropped_name = dropped_card.card_template.name
                 
                 await session.commit()
                 
@@ -420,10 +433,13 @@ async def end_pve_battle(callback: CallbackQuery, user_id: int, won: bool):
                 
                 if leveled_up:
                     result_text += f"🎉 <b>Новый уровень! Теперь ты {user.level} уровня!</b>\n"
+
+                if unlocked_from_level:
+                    unlocked_names = ", ".join(t.name for t in unlocked_from_level)
+                    result_text += f"✨ <b>Новые PvP-техники:</b> {unlocked_names}\n"
                 
-                if card_dropped:
-                    result_text += "🎴 <b>Выпала новая карта!</b>\n"
-                    # Здесь можно добавить логику выпадения карты
+                if card_dropped_name:
+                    result_text += f"🎴 <b>Выпала новая карта:</b> {card_dropped_name}\n"
                 
                 result_text += f"\n💪 Твоя сила растет!"
                 
